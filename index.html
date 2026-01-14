@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supabase P2P Football</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .goal-zone { transition: 0.3s; border: 2px dashed rgba(255,255,255,0.3); }
+        .goal-zone:hover { background: rgba(255,255,255,0.2); cursor: pointer; }
+        .ball { transition: 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        .selected { background: #3b82f6 !important; border: 2px solid white !important; }
+    </style>
+</head>
+<body class="bg-slate-900 text-white min-h-screen flex flex-col items-center p-4">
+
+    <div id="setup-screen" class="bg-white text-black p-8 rounded-xl shadow-2xl mt-10 w-full max-w-md text-center">
+        <h2 class="text-3xl font-extrabold mb-6 text-slate-800">Soccer Duel</h2>
+        <div class="mb-6">
+            <label class="block text-sm font-semibold mb-2 text-left">1. Enter Secret Room Name</label>
+            <input id="room-input" type="text" placeholder="e.g. dragon-cup-2024" 
+                   class="w-full border-2 border-slate-200 p-3 rounded-lg focus:border-blue-500 outline-none text-center text-lg">
+        </div>
+        <label class="block text-sm font-semibold mb-2 text-left">2. Choose Your Role</label>
+        <div class="flex gap-4">
+            <button onclick="joinGame('Striker')" class="w-1/2 bg-red-600 hover:bg-red-700 text-white py-4 rounded-lg font-bold shadow-lg transition-all">STRIKER</button>
+            <button onclick="joinGame('GK')" class="w-1/2 bg-blue-600 hover:bg-blue-700 text-white py-4 rounded-lg font-bold shadow-lg transition-all">GOALKEEPER</button>
+        </div>
+        <p class="mt-4 text-xs text-slate-400 italic">Tell your friend to use the same room name and the opposite role.</p>
+    </div>
+
+    <div id="game-screen" class="hidden w-full max-w-4xl mt-5">
+        <div class="flex justify-between items-center bg-black/40 p-6 rounded-t-2xl backdrop-blur-md">
+            <div class="text-center">
+                <p class="text-xs uppercase tracking-widest opacity-70">Playing As</p>
+                <p id="role-display" class="font-black text-2xl text-blue-400">-</p>
+            </div>
+            <div class="text-5xl font-mono font-black">
+                <span id="score-striker" class="text-red-500">0</span> : <span id="score-gk" class="text-blue-500">0</span>
+            </div>
+            <div class="text-right">
+                <p id="status-text" class="text-yellow-400 font-bold animate-pulse text-sm">WAITING FOR MOVE...</p>
+            </div>
+        </div>
+
+        <div class="relative bg-green-600 h-[400px] border-b-8 border-white flex items-end justify-center overflow-hidden rounded-b-2xl shadow-inner">
+            <div class="absolute inset-0 opacity-20 bg-[radial-gradient(circle,transparent_20%,#000_100%)]"></div>
+            
+            <div class="relative w-[85%] h-[320px] border-t-8 border-x-8 border-white bg-green-700/40 grid grid-cols-3 grid-rows-2 z-10">
+                <div onclick="makeMove(1)" id="z1" class="goal-zone flex items-center justify-center font-bold">TL</div>
+                <div onclick="makeMove(2)" id="z2" class="goal-zone flex items-center justify-center border-x-4">TOP</div>
+                <div onclick="makeMove(3)" id="z3" class="goal-zone flex items-center justify-center">TR</div>
+                <div onclick="makeMove(4)" id="z4" class="goal-zone flex items-center justify-center border-t-4">BL</div>
+                <div onclick="makeMove(5)" id="z5" class="goal-zone flex items-center justify-center border-t-4 border-x-4">CTR</div>
+                <div onclick="makeMove(6)" id="z6" class="goal-zone flex items-center justify-center border-t-4">BR</div>
+            </div>
+            
+            <div id="ball" class="ball absolute bottom-6 text-6xl z-20 drop-shadow-2xl">⚽</div>
+        </div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const SUPABASE_URL = 'https://hrquqselmhxcgdpllsti.supabase.co';
+        const SUPABASE_KEY = 'sb_publishable_1LKo3bAwAjIw-d6GezmjNA_3e-qgMLO';
+        
+        const { createClient } = supabase;
+        const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let room, myRole, myMove = null;
+
+        async function joinGame(role) {
+            room = document.getElementById('room-input').value.trim().toLowerCase();
+            if(!room) return alert("Please enter a room name first!");
+            myRole = role;
+
+            // 1. Create room if it doesn't exist
+            await _supabase.from('game_moves').upsert({ 
+                room_id: room,
+                striker_score: 0,
+                gk_score: 0 
+            }, { onConflict: 'room_id' });
+
+            document.getElementById('setup-screen').classList.add('hidden');
+            document.getElementById('game-screen').classList.remove('hidden');
+            document.getElementById('role-display').innerText = myRole;
+
+            // 2. Listen for Realtime Updates
+            _supabase
+                .channel(`room-${room}`)
+                .on('postgres_changes', { 
+                    event: 'UPDATE', 
+                    schema: 'public', 
+                    table: 'game_moves', 
+                    filter: `room_id=eq.${room}` 
+                }, payload => {
+                    const data = payload.new;
+                    updateUI(data);
+                    if(data.striker_move && data.gk_move) {
+                        handleResolution(data.striker_move, data.gk_move);
+                    }
+                })
+                .subscribe();
+        }
+
+        async function makeMove(id) {
+            if(myMove) return; // Prevent multiple clicks
+            myMove = id;
+            document.getElementById('z' + id).classList.add('selected');
+            document.getElementById('status-text').innerText = "WAITING FOR OPPONENT...";
+
+            const column = (myRole === 'Striker') ? 'striker_move' : 'gk_move';
+            const updateData = {};
+            updateData[column] = id;
+
+            await _supabase.from('game_moves').update(updateData).eq('room_id', room);
+        }
+
+        function updateUI(data) {
+            document.getElementById('score-striker').innerText = data.striker_score || 0;
+            document.getElementById('score-gk').innerText = data.gk_score || 0;
+        }
+
+        function handleResolution(sMove, gMove) {
+            const zPos = { 
+                1:{t:'15',l:'15'}, 2:{t:'15',l:'50'}, 3:{t:'15',l:'85'}, 
+                4:{t:'65',l:'15'}, 5:{t:'65',l:'50'}, 6:{t:'65',l:'85'} 
+            };
+            
+            const ball = document.getElementById('ball');
+            ball.style.bottom = (100 - parseInt(zPos[sMove].t)) + "%";
+            ball.style.left = zPos[sMove].l;
+            ball.style.transform = "scale(0.6)";
+
+            setTimeout(async () => {
+                const isSaved = sMove === gMove;
+                
+                // Show result briefly
+                document.getElementById('status-text').innerText = isSaved ? "SAVED!" : "GOAL!";
+                
+                // Only one client (the Striker) updates the score and resets moves
+                if(myRole === 'Striker') {
+                    let sScore = parseInt(document.getElementById('score-striker').innerText);
+                    let gScore = parseInt(document.getElementById('score-gk').innerText);
+                    
+                    if(isSaved) gScore++; else sScore++;
+
+                    await _supabase.from('game_moves').update({
+                        striker_move: null,
+                        gk_move: null,
+                        striker_score: sScore,
+                        gk_score: gScore
+                    }).eq('room_id', room);
+                }
+
+                // Local Reset
+                setTimeout(() => {
+                    myMove = null;
+                    document.querySelectorAll('.goal-zone').forEach(z => z.classList.remove('selected'));
+                    document.getElementById('status-text').innerText = "YOUR TURN";
+                    ball.style.bottom = "24px"; 
+                    ball.style.left = "50%";
+                    ball.style.transform = "scale(1)";
+                }, 1000);
+            }, 800);
+        }
+    </script>
+</body>
+</html>
